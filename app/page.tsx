@@ -180,6 +180,22 @@ export default function BingoPage() {
   };
 
   /* =====================
+     Host: reset
+  ===================== */
+  const resetGame = async () => {
+    if (role !== "host") return;
+
+    await supabase
+      .from("bingo_state")
+      .update({ drawn: [], current: null })
+      .eq("id", 1);
+
+    setDrawn([]);
+    setCurrent(null);
+    setIsRolling(false);
+  };
+
+  /* =====================
      Player: tap
   ===================== */
   const onTap = (i: number) => {
@@ -210,7 +226,6 @@ export default function BingoPage() {
         {role === "host" ? "Host Screen" : "Player Card"}
       </div>
 
-      {/* Player connection status */}
       {role === "player" && (
         <div style={styles.connection}>
           {connectionStatus === "connecting" && "🟡 Connecting…"}
@@ -219,7 +234,6 @@ export default function BingoPage() {
         </div>
       )}
 
-      {/* HOST */}
       {role === "host" && (
         <>
           <div style={styles.bigNumber}>{current ?? "―"}</div>
@@ -239,11 +253,14 @@ export default function BingoPage() {
             <button onClick={() => setShowQR(true)} style={styles.qrButton}>
               QR
             </button>
+
+            <button onClick={resetGame} style={styles.resetButton}>
+              RESET
+            </button>
           </div>
         </>
       )}
 
-      {/* PLAYER */}
       {role === "player" && card.length > 0 && (
         <>
           <div style={styles.grid}>
@@ -275,7 +292,6 @@ export default function BingoPage() {
         </>
       )}
 
-      {/* QR Modal */}
       {showQR && (
         <div style={styles.modalBg} onClick={() => setShowQR(false)}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -290,7 +306,6 @@ export default function BingoPage() {
         </div>
       )}
 
-      {/* animations */}
       <style jsx global>{`
         @keyframes holeOpen {
           from {
@@ -380,6 +395,16 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(255,255,255,0.3)",
     background: "transparent",
     color: "#f8fafc",
+    cursor: "pointer",
+  },
+
+  resetButton: {
+    fontSize: 12,
+    padding: "8px 14px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.2)",
+    background: "transparent",
+    color: "#94a3b8",
     cursor: "pointer",
   },
 
