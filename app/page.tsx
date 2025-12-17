@@ -49,11 +49,11 @@ const isBingo = (opened: boolean[]) => {
   return lines.some((line) => line.every((i) => opened[i]));
 };
 
+type ConnectionStatus = "connecting" | "connected" | "error";
+
 /* =====================
    Component
 ===================== */
-type ConnectionStatus = "connecting" | "connected" | "error";
-
 export default function BingoPage() {
   const role =
     typeof window !== "undefined"
@@ -65,19 +65,18 @@ export default function BingoPage() {
       ? `${window.location.origin}/?role=player`
       : "";
 
+  /* ---- shared state ---- */
   const [drawn, setDrawn] = useState<number[]>([]);
   const [current, setCurrent] = useState<number | null>(null);
   const [isRolling, setIsRolling] = useState(false);
-  const [showQR, setShowQR] = useState(false);
 
-  const [card] = useState<number[]>(generateCard());
-  const [opened, setOpened] = useState<boolean[]>(
-    Array(25)
-      .fill(false)
-      .map((_, i) => i === FREE_INDEX)
-  );
+  /* ---- player local state ---- */
+  const [card, setCard] = useState<number[]>([]);
+  const [opened, setOpened] = useState<boolean[]>([]);
   const [bingo, setBingo] = useState(false);
 
+  /* ---- ui ---- */
+  const [showQR, setShowQR] = useState(false);
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
 
@@ -119,6 +118,34 @@ export default function BingoPage() {
       supabase.removeChannel(channel);
     };
   }, []);
+
+  /* =====================
+     Player: card restore
+  ===================== */
+  useEffect(() => {
+    if (role !== "player") return;
+
+    const savedCard = localStorage.getItem("bingo-card");
+    const savedOpened = localStorage.getItem("bingo-opened");
+
+    if (savedCard) {
+      setCard(JSON.parse(savedCard));
+    } else {
+      const newCard = generateCard();
+      setCard(newCard);
+      localStorage.setItem("bingo-card", JSON.stringify(newCard));
+    }
+
+    if (savedOpened) {
+      setOpened(JSON.parse(savedOpened));
+    } else {
+      const initial = Array(25)
+        .fill(false)
+        .map((_, i) => i === FREE_INDEX);
+      setOpened(initial);
+      localStorage.setItem("bingo-opened", JSON.stringify(initial));
+    }
+  }, [role]);
 
   /* =====================
      Host: draw
@@ -163,6 +190,8 @@ export default function BingoPage() {
     const next = [...opened];
     next[i] = true;
     setOpened(next);
+    localStorage.setItem("bingo-opened", JSON.stringify(next));
+
     playSound("/open.mp3");
 
     if (!bingo && isBingo(next)) {
@@ -181,7 +210,7 @@ export default function BingoPage() {
         {role === "host" ? "Host Screen" : "Player Card"}
       </div>
 
-      {/* ===== Player connection status ===== */}
+      {/* Player connection status */}
       {role === "player" && (
         <div style={styles.connection}>
           {connectionStatus === "connecting" && "🟡 Connecting…"}
@@ -190,7 +219,7 @@ export default function BingoPage() {
         </div>
       )}
 
-      {/* ===== HOST ===== */}
+      {/* HOST */}
       {role === "host" && (
         <>
           <div style={styles.bigNumber}>{current ?? "―"}</div>
@@ -214,8 +243,8 @@ export default function BingoPage() {
         </>
       )}
 
-      {/* ===== PLAYER ===== */}
-      {role === "player" && (
+      {/* PLAYER */}
+      {role === "player" && card.length > 0 && (
         <>
           <div style={styles.grid}>
             {card.map((num, i) => (
@@ -246,7 +275,7 @@ export default function BingoPage() {
         </>
       )}
 
-      {/* ===== QR MODAL ===== */}
+      {/* QR Modal */}
       {showQR && (
         <div style={styles.modalBg} onClick={() => setShowQR(false)}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -261,7 +290,7 @@ export default function BingoPage() {
         </div>
       )}
 
-      {/* ===== Animations ===== */}
+      {/* animations */}
       <style jsx global>{`
         @keyframes holeOpen {
           from {
