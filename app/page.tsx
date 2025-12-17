@@ -1,12 +1,34 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
 
+/* =====================
+   Supabase
+===================== */
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
+
+/* =====================
+   定数
+===================== */
 const MAX = 75;
 const FREE_INDEX = 12;
 
+/* =====================
+   util
+===================== */
 const playSound = (src: string) => {
   const audio = new Audio(src);
   audio.play();
+};
+
+const generateCard = () => {
+  const nums = Array.from({ length: MAX }, (_, i) => i + 1);
+  nums.sort(() => Math.random() - 0.5);
+  nums[FREE_INDEX] = 0;
+  return nums.slice(0, 25);
 };
 
 const isBingo = (opened: boolean[]) => {
@@ -27,12 +49,10 @@ const isBingo = (opened: boolean[]) => {
   return lines.some((line) => line.every((i) => opened[i]));
 };
 
-const generateCard = () => {
-  const nums = Array.from({ length: MAX }, (_, i) => i + 1);
-  nums.sort(() => Math.random() - 0.5);
-  nums[FREE_INDEX] = 0;
-  return nums.slice(0, 25);
-};
+/* =====================
+   Component
+===================== */
+type ConnectionStatus = "connecting" | "connected" | "error";
 
 export default function BingoPage() {
   const role =
@@ -44,14 +64,6 @@ export default function BingoPage() {
     typeof window !== "undefined"
       ? `${window.location.origin}/?role=player`
       : "";
-
-  const channel = useMemo(
-    () =>
-      typeof window !== "undefined"
-        ? new BroadcastChannel("bingo-channel")
-        : null,
-    []
-  );
 
   const [drawn, setDrawn] = useState<number[]>([]);
   const [current, setCurrent] = useState<number | null>(null);
@@ -66,15 +78,52 @@ export default function BingoPage() {
   );
   const [bingo, setBingo] = useState(false);
 
-  useEffect(() => {
-    if (!channel) return;
-    channel.onmessage = (e) => {
-      setDrawn(e.data.drawn);
-      setCurrent(e.data.current);
-    };
-  }, [channel]);
+  const [connectionStatus, setConnectionStatus] =
+    useState<ConnectionStatus>("connecting");
 
-  const draw = () => {
+  /* =====================
+     初期ロード + Realtime
+  ===================== */
+  useEffect(() => {
+    const load = async () => {
+      const { data } = await supabase
+        .from("bingo_state")
+        .select("*")
+        .eq("id", 1)
+        .single();
+
+      if (data) {
+        setDrawn(data.drawn ?? []);
+        setCurrent(data.current);
+      }
+    };
+    load();
+
+    const channel = supabase
+      .channel("bingo-realtime")
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "bingo_state" },
+        (payload) => {
+          setDrawn(payload.new.drawn ?? []);
+          setCurrent(payload.new.current);
+        }
+      )
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") setConnectionStatus("connected");
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT")
+          setConnectionStatus("error");
+      });
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  /* =====================
+     Host: draw
+  ===================== */
+  const draw = async () => {
     if (isRolling) return;
 
     const remaining = Array.from({ length: MAX }, (_, i) => i + 1).filter(
@@ -89,19 +138,23 @@ export default function BingoPage() {
       setCurrent(remaining[Math.floor(Math.random() * remaining.length)]);
     }, 80);
 
-    setTimeout(() => {
+    setTimeout(async () => {
       clearInterval(shuffle);
       const final = remaining[Math.floor(Math.random() * remaining.length)];
       const next = [...drawn, final];
 
-      setDrawn(next);
-      setCurrent(final);
-      setIsRolling(false);
+      await supabase
+        .from("bingo_state")
+        .update({ drawn: next, current: final })
+        .eq("id", 1);
 
-      channel?.postMessage({ drawn: next, current: final });
+      setIsRolling(false);
     }, 3000);
   };
 
+  /* =====================
+     Player: tap
+  ===================== */
   const onTap = (i: number) => {
     if (opened[i]) return;
     const num = card[i];
@@ -118,6 +171,9 @@ export default function BingoPage() {
     }
   };
 
+  /* =====================
+     Render
+  ===================== */
   return (
     <main style={styles.main}>
       <h1 style={styles.title}>🎄 Christmas Bingo</h1>
@@ -125,38 +181,40 @@ export default function BingoPage() {
         {role === "host" ? "Host Screen" : "Player Card"}
       </div>
 
-      {/* HOST */}
+      {/* ===== Player connection status ===== */}
+      {role === "player" && (
+        <div style={styles.connection}>
+          {connectionStatus === "connecting" && "🟡 Connecting…"}
+          {connectionStatus === "connected" && "🟢 Connected"}
+          {connectionStatus === "error" && "🔴 Not connected"}
+        </div>
+      )}
+
+      {/* ===== HOST ===== */}
       {role === "host" && (
         <>
           <div style={styles.bigNumber}>{current ?? "―"}</div>
 
           <div style={styles.hostButtons}>
-            <button style={styles.button} onClick={draw} disabled={isRolling}>
-              {isRolling ? "Rolling… 🥁" : "Draw 🎯"}
+            <button
+              onClick={draw}
+              disabled={isRolling}
+              style={{
+                ...styles.drawButton,
+                opacity: isRolling ? 0.6 : 1,
+              }}
+            >
+              {isRolling ? "Rolling… 🥁" : "DRAW"}
             </button>
 
-            <button style={styles.qrButton} onClick={() => setShowQR(true)}>
-              Show QR 📱
+            <button onClick={() => setShowQR(true)} style={styles.qrButton}>
+              QR
             </button>
-          </div>
-
-          <div style={styles.hostGrid}>
-            {Array.from({ length: MAX }, (_, i) => i + 1).map((n) => (
-              <div
-                key={n}
-                style={{
-                  ...styles.hostCell,
-                  background: drawn.includes(n) ? "#22c55e" : "#334155",
-                }}
-              >
-                {n}
-              </div>
-            ))}
           </div>
         </>
       )}
 
-      {/* PLAYER */}
+      {/* ===== PLAYER ===== */}
       {role === "player" && (
         <>
           <div style={styles.grid}>
@@ -188,7 +246,7 @@ export default function BingoPage() {
         </>
       )}
 
-      {/* QR MODAL */}
+      {/* ===== QR MODAL ===== */}
       {showQR && (
         <div style={styles.modalBg} onClick={() => setShowQR(false)}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -197,13 +255,13 @@ export default function BingoPage() {
               src={`https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(
                 playerUrl
               )}`}
-              alt="QR Code"
             />
             <p>{playerUrl}</p>
           </div>
         </div>
       )}
 
+      {/* ===== Animations ===== */}
       <style jsx global>{`
         @keyframes holeOpen {
           from {
@@ -216,9 +274,9 @@ export default function BingoPage() {
           }
         }
         .confetti::before {
-          content: "🎉 🎊 🎉 🎊 🎉 🎊";
-          font-size: 40px;
-          animation: fall 1.5s linear infinite;
+          content: "🎉 🎊 🎉 🎊 🎉 🎊 🎉 🎊";
+          font-size: 36px;
+          animation: fall 1.2s linear infinite;
           display: block;
         }
         @keyframes fall {
@@ -236,6 +294,9 @@ export default function BingoPage() {
   );
 }
 
+/* =====================
+   styles
+===================== */
 const styles: Record<string, React.CSSProperties> = {
   main: {
     minHeight: "100vh",
@@ -245,23 +306,54 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: "center",
   },
   title: { fontSize: 28 },
-  subtitle: {
-    fontSize: 14,
-    opacity: 0.7,
-    marginBottom: 16,
+  subtitle: { fontSize: 14, opacity: 0.7, marginBottom: 16 },
+
+  connection: {
+    position: "fixed",
+    top: 12,
+    right: 12,
+    fontSize: 12,
+    background: "rgba(0,0,0,0.4)",
+    padding: "4px 8px",
+    borderRadius: 8,
   },
+
   bigNumber: {
     fontSize: 160,
     fontWeight: 700,
     color: "#facc15",
+    marginBottom: 16,
   },
+
   hostButtons: {
     display: "flex",
     justifyContent: "center",
-    gap: 12,
+    gap: 16,
+    marginBottom: 24,
   },
-  button: { fontSize: 18, padding: "10px 20px" },
-  qrButton: { fontSize: 16, padding: "10px 16px" },
+
+  drawButton: {
+    fontSize: 22,
+    fontWeight: 700,
+    padding: "14px 36px",
+    borderRadius: 999,
+    border: "none",
+    cursor: "pointer",
+    color: "#020617",
+    background: "linear-gradient(135deg, #facc15, #fde047)",
+    boxShadow: "0 10px 30px rgba(250,204,21,0.4)",
+  },
+
+  qrButton: {
+    fontSize: 16,
+    padding: "12px 20px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.3)",
+    background: "transparent",
+    color: "#f8fafc",
+    cursor: "pointer",
+  },
+
   grid: {
     display: "grid",
     gridTemplateColumns: "repeat(5,1fr)",
@@ -269,6 +361,7 @@ const styles: Record<string, React.CSSProperties> = {
     maxWidth: 340,
     margin: "24px auto",
   },
+
   cell: {
     position: "relative",
     aspectRatio: "1",
@@ -276,8 +369,10 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
+    userSelect: "none",
     overflow: "hidden",
   },
+
   hole: {
     position: "absolute",
     inset: 0,
@@ -285,19 +380,13 @@ const styles: Record<string, React.CSSProperties> = {
       "radial-gradient(circle,#020617 0%,#020617 40%,transparent 45%)",
     animation: "holeOpen 0.35s ease-out forwards",
   },
-  bingo: { fontSize: 40, color: "#facc15" },
-  hostGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(15,1fr)",
-    gap: 4,
-    maxWidth: 600,
-    margin: "24px auto",
+
+  bingo: {
+    fontSize: 40,
+    color: "#facc15",
+    marginTop: 16,
   },
-  hostCell: {
-    fontSize: 12,
-    padding: 4,
-    borderRadius: 4,
-  },
+
   modalBg: {
     position: "fixed",
     inset: 0,
@@ -306,6 +395,7 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     justifyContent: "center",
   },
+
   modal: {
     background: "#020617",
     padding: 24,
