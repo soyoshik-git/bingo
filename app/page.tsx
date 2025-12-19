@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 /* =====================
@@ -71,6 +71,9 @@ export default function BingoPage() {
   const [isRolling, setIsRolling] = useState(false);
   const [gameId, setGameId] = useState(1);
 
+  /* ---- presence ---- */
+  const [playerCount, setPlayerCount] = useState(0);
+
   /* ---- player local state ---- */
   const [card, setCard] = useState<number[]>([]);
   const [opened, setOpened] = useState<boolean[]>([]);
@@ -82,8 +85,11 @@ export default function BingoPage() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
 
+  // ★ 前回の game_id を保持して、NEW GAMEのときだけ通知を出す
+  const lastGameIdRef = useRef<number>(1);
+
   /* =====================
-     初期ロード + Realtime
+     初期ロード + Realtime + Presence
   ===================== */
   useEffect(() => {
     const load = async () => {
@@ -97,32 +103,61 @@ export default function BingoPage() {
         setDrawn(data.drawn ?? []);
         setCurrent(data.current);
         setGameId(data.game_id ?? 1);
+        lastGameIdRef.current = data.game_id ?? 1; // ★ 初期値同期
       }
     };
     load();
 
-    const channel = supabase
-      .channel("bingo-realtime")
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "bingo_state" },
-        (payload) => {
-          setDrawn(payload.new.drawn ?? []);
-          setCurrent(payload.new.current);
-          setGameId(payload.new.game_id ?? 1);
+    const channel = supabase.channel("bingo-room", {
+      config: { presence: { key: role } },
+    });
+
+    // --- DB UPDATE ---
+    channel.on(
+      "postgres_changes",
+      { event: "UPDATE", schema: "public", table: "bingo_state" },
+      (payload) => {
+        const nextDrawn = payload.new.drawn ?? [];
+        const nextCurrent = payload.new.current ?? null;
+        const nextGameId = payload.new.game_id ?? 1;
+
+        setDrawn(nextDrawn);
+        setCurrent(nextCurrent);
+        setGameId(nextGameId);
+
+        // ★ game_id が増えたときだけ New Game 通知
+        if (nextGameId > lastGameIdRef.current) {
           setNewGameNotice(true);
         }
-      )
-      .subscribe((status) => {
-        if (status === "SUBSCRIBED") setConnectionStatus("connected");
-        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT")
-          setConnectionStatus("error");
-      });
+        lastGameIdRef.current = nextGameId;
+      }
+    );
+
+    // --- Presence sync ---
+    channel.on("presence", { event: "sync" }, () => {
+      const state = channel.presenceState();
+      const players = Object.values(state).filter(
+        (metas: any) => metas[0]?.key === "player"
+      );
+      setPlayerCount(players.length);
+    });
+
+    channel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        setConnectionStatus("connected");
+        if (role === "player") {
+          channel.track({ key: "player" });
+        }
+      }
+      if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+        setConnectionStatus("error");
+      }
+    });
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [role]);
 
   /* =====================
      Player: card restore
@@ -156,6 +191,7 @@ export default function BingoPage() {
      Host: draw（違和感修正版）
   ===================== */
   const draw = async () => {
+    if (role !== "host") return;
     if (isRolling) return;
 
     const remaining = Array.from({ length: MAX }, (_, i) => i + 1).filter(
@@ -181,10 +217,7 @@ export default function BingoPage() {
 
       await supabase
         .from("bingo_state")
-        .update({
-          drawn: next,
-          current: final,
-        })
+        .update({ drawn: next, current: final })
         .eq("id", 1);
 
       setIsRolling(false);
@@ -192,27 +225,21 @@ export default function BingoPage() {
   };
 
   /* =====================
-     Host: reset
+     Host: reset / new game
   ===================== */
   const resetGame = async () => {
     if (role !== "host") return;
-
     await supabase
       .from("bingo_state")
-      .update({ drawn: [], current: null })
+      .update({
+        drawn: [],
+        current: null,
+      })
       .eq("id", 1);
-
-    setDrawn([]);
-    setCurrent(null);
-    setIsRolling(false);
   };
 
-  /* =====================
-     Host: NEW GAME
-  ===================== */
   const newGame = async () => {
     if (role !== "host") return;
-
     await supabase
       .from("bingo_state")
       .update({
@@ -221,16 +248,15 @@ export default function BingoPage() {
         game_id: gameId + 1,
       })
       .eq("id", 1);
-
-    setDrawn([]);
-    setCurrent(null);
   };
 
   /* =====================
      Player: tap
   ===================== */
   const onTap = (i: number) => {
+    if (role !== "player") return;
     if (opened[i]) return;
+
     const num = card[i];
     if (num !== 0 && !drawn.includes(num)) return;
 
@@ -257,6 +283,12 @@ export default function BingoPage() {
         {role === "host" ? "Host Screen" : "Player Card"}
       </div>
 
+      {/* Host info */}
+      {role === "host" && (
+        <div style={styles.playerCount}>👥 Players: {playerCount}</div>
+      )}
+
+      {/* Player connection */}
       {role === "player" && (
         <div style={styles.connection}>
           {connectionStatus === "connecting" && "🟡 Connecting…"}
@@ -265,6 +297,7 @@ export default function BingoPage() {
         </div>
       )}
 
+      {/* HOST */}
       {role === "host" && (
         <>
           <div style={styles.bigNumber}>{current ?? "―"}</div>
@@ -296,21 +329,32 @@ export default function BingoPage() {
         </>
       )}
 
+      {/* PLAYER: New Game notice（NEW GAMEのときだけ出る） */}
       {role === "player" && newGameNotice && (
         <div style={styles.newGameNotice}>
-          <p>🎄 New Game Started</p>
+          <p style={{ margin: 0, fontWeight: 700 }}>🎄 New Game Started</p>
           <button
+            style={styles.newGameNoticeButton}
             onClick={() => {
               localStorage.removeItem("bingo-card");
               localStorage.removeItem("bingo-opened");
+              // bingo表示もリセットしたいのでリロードでOK
               location.reload();
             }}
           >
             Get New Card
           </button>
+          <button
+            style={styles.newGameNoticeClose}
+            onClick={() => setNewGameNotice(false)}
+            aria-label="close"
+          >
+            ×
+          </button>
         </div>
       )}
 
+      {/* PLAYER */}
       {role === "player" && card.length > 0 && (
         <>
           <div style={styles.grid}>
@@ -335,6 +379,22 @@ export default function BingoPage() {
 
           {bingo && <div style={styles.bingo}>🎉 BINGO!! 🎉</div>}
         </>
+      )}
+
+      {/* QR MODAL */}
+      {showQR && (
+        <div style={styles.modalBg} onClick={() => setShowQR(false)}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>Join Bingo</h3>
+            <img
+              alt="QR"
+              src={`https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(
+                playerUrl
+              )}`}
+            />
+            <p style={{ fontSize: 12, opacity: 0.85 }}>{playerUrl}</p>
+          </div>
+        </div>
       )}
     </main>
   );
@@ -364,6 +424,16 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 8,
   },
 
+  playerCount: {
+    position: "fixed",
+    top: 12,
+    left: 12,
+    fontSize: 12,
+    background: "rgba(0,0,0,0.4)",
+    padding: "4px 8px",
+    borderRadius: 8,
+  },
+
   bigNumber: {
     fontSize: 160,
     fontWeight: 700,
@@ -374,8 +444,7 @@ const styles: Record<string, React.CSSProperties> = {
   hostButtons: {
     display: "flex",
     justifyContent: "center",
-    gap: 12,
-    marginBottom: 24,
+    gap: 10,
     flexWrap: "wrap",
   },
 
@@ -386,8 +455,8 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 999,
     border: "none",
     cursor: "pointer",
-    color: "#020617",
     background: "linear-gradient(135deg, #facc15, #fde047)",
+    color: "#020617",
   },
 
   qrButton: {
@@ -396,7 +465,8 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 999,
     border: "1px solid rgba(255,255,255,0.3)",
     background: "transparent",
-    color: "#f8fafc",
+    color: "#fff",
+    cursor: "pointer",
   },
 
   resetButton: {
@@ -406,6 +476,7 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(255,255,255,0.2)",
     background: "transparent",
     color: "#94a3b8",
+    cursor: "pointer",
   },
 
   newGameButton: {
@@ -415,6 +486,7 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(250,204,21,0.4)",
     background: "transparent",
     color: "#facc15",
+    cursor: "pointer",
   },
 
   newGameNotice: {
@@ -425,7 +497,33 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#020617",
     border: "1px solid #facc15",
     borderRadius: 12,
-    padding: "12px 16px",
+    padding: "12px 44px 12px 16px",
+    minWidth: 220,
+    textAlign: "left",
+    boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
+  },
+
+  newGameNoticeButton: {
+    marginTop: 10,
+    fontSize: 12,
+    padding: "8px 12px",
+    borderRadius: 10,
+    border: "1px solid rgba(250,204,21,0.5)",
+    background: "rgba(250,204,21,0.12)",
+    color: "#facc15",
+    cursor: "pointer",
+  },
+
+  newGameNoticeClose: {
+    position: "absolute",
+    top: 6,
+    right: 10,
+    fontSize: 18,
+    lineHeight: "18px",
+    border: "none",
+    background: "transparent",
+    color: "#94a3b8",
+    cursor: "pointer",
   },
 
   grid: {
@@ -452,12 +550,27 @@ const styles: Record<string, React.CSSProperties> = {
     inset: 0,
     background:
       "radial-gradient(circle,#020617 0%,#020617 40%,transparent 45%)",
-    animation: "holeOpen 0.35s ease-out forwards",
   },
 
   bingo: {
     fontSize: 40,
     color: "#facc15",
     marginTop: 16,
+  },
+
+  modalBg: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.6)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  modal: {
+    background: "#020617",
+    padding: 24,
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.12)",
   },
 };
